@@ -1,0 +1,612 @@
+#!/bin/bash
+
+#######################################################
+# Script     : testit
+# Description: A full-featured testing suite for CPE357
+# Authors    : GAP, TPC
+# Version    : 3.1.1 - Spring 2019
+
+# Copyright (C) 2019
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# Some Notes:
+# Don't forget to change QXX in the sourcedir path!
+# (see "User Configurable Defaults")
+
+# Useful link: https://devhints.io/bash
+
+# Tests File Structure:
+# The test framework requires each test to have a
+# description (.desc file). Arguments (.arg) files and
+# stdin input (.in) files are optional (.in files will
+# be created automatically if they do not exist). Tests
+# are stored by default in the "tests" directory,
+# though can be changed with the '-D' flag. The default
+# can be changed by adjusting the variable below. 
+# Output is placed in the "tests/out" folder by default
+# and consists of a .stdout/.stdout.expect pair, 
+# .stderr/.stderr.expect, .exit/.exit.expect, and if
+# selected, a .memcheck/.memcheck.expect file pair for
+# each test filename. The output directory is also 
+# configurable (see "User Configurable Defaults").
+
+#######################################################
+
+# User Configurable Defaults
+# -----------------------------------
+outdir=out
+indir=tests
+doMemCheck=0;
+processReqd=10;
+saferun=~kmammen-grader/bin/SafeRun
+sourcedir=~kmammen-grader/evaluations/F20/357
+
+#######################################################
+# FUNCTIONS
+#######################################################
+function usage {
+    local basenm=$(basename "$0")
+    echo "Usage: $basenm [option]... [executable]"
+    echo "Tests a target executable against a reference solution specified in [executable]."
+    echo ""
+    echo "Basic options:"
+    printf "%4s, %-26s%s\n" "-o" "--out <file>" "changes test target from a.out to the specified [file]";
+    printf "%4s, %-26s%s\n" "-c" "--complexity <file>..." "runs the complexity program on *c or specified files";
+    printf "%4s, %-26s%s\n" "-C" "--clean" "removes test outputs and cleans make";
+    printf "%4s, %-26s%s\n" "-d" "--descriptions <type> " "prints descriptions of tests in the test dir, all if empty";
+    printf "%4s, %-26s%s\n" "-D" "--directory <dir>" "runs tests from specified directory.";
+    printf "%4s, %-26s%s\n" "-m" "--memcheck" "enables valgrind memory checking. Results may vary.";
+    printf "%4s, %-26s%s\n" "-p" "--process <num>" "specify the number of processes for SafeRun.";
+    printf "%4s, %-26s%s\n" "-s" "--single <name>" "runs an individual test";
+    printf "%4s, %-26s%s\n" "-t" "--test <name>..." "displays the diff results of the specified test(s).";
+    printf "%4s, %-26s%s\n" "-g" "--gen <assignment>" "generates folder and tests structures.";
+    printf "%4s, %-26s%s\n" "-gd" "--gendir <assignment>" "generates folder structure for assignments.";
+    printf "%4s, %-26s%s\n" "-gt" "--gentests <assignment>" "generates test descriptions for assignments.";
+    printf "\n%6s%-11s%s\n\n" "" "--help" "display this help and exit";
+}
+
+# printHeader Function
+# -----------------------------------
+# Fancy formatting for headers
+# -----------------------------------
+function printHeader {
+  echo -e "\e[4m\e[1m$1\e[0m"
+}
+
+# cleanUp Function
+# -----------------------------------
+# Removes test results
+# -----------------------------------
+function cleanUp {
+   rm -r "$indir/$outdir"
+   mkdir -p "$indir/$outdir"
+}
+
+# checkProcesses Function
+# -----------------------------------
+# Check to make sure there are enough
+# process available to launch the program
+# -----------------------------------
+function checkProcesses {
+   local processReqd=$1;
+   local processLim=$(ulimit -u);
+   local processUsed=$(ps -U $(echo "$USER") | wc -l);
+   local processAvail=$((processLim - processUsed - 1));
+   if [ $processAvail -lt $processReqd ]; then
+      echo "Only have $processAvail/$processReqd processes available."
+      exit
+   fi
+}
+
+# setupDir Function
+# -----------------------------------
+# Sets up assignment directory structure
+# including reqs, makefile, tests, and 
+# associated executables
+# 
+# Args:
+#   $1: assignment name to use
+# -----------------------------------
+function setupDir {
+   if [ -z $1 ]; then
+      echo "ERROR: No assignment specified."
+      exit;
+   fi
+   echo "Setting up directory for $1."
+   local dir="$sourcedir/$1"
+   
+   if [ ! -d "$dir" ]; then
+      echo "ERROR: Assignment '$1' does not exist."
+      exit;
+   fi
+
+   local validReqs=true;
+   if [ ! -r "$makeDir/requirements" ]; then
+      echo "ERROR: Requirements not found."
+      validReqs=false;
+   fi
+
+   local assignment=${1//[[:digit:]]/};
+   
+   local folder="temp";
+   if [ $assignment == "Exercise" ]; then
+      folder="exercise${1:8}";
+   elif [ $assignment == "Project" ]; then
+      folder="project${1:7}";
+   elif [[ $assignment =~ "Exam" ]]; then
+      folder=$1;
+   else
+      echo "ERROR: $assignment is not a valid assignment type.";
+      return;
+   fi
+   mkdir $folder
+   cd $folder
+
+   #copy files
+   echo "Copying Makefile"
+   cp "$dir/Makefile" .
+
+   if [ "$validReqs" = true ]; then
+      echo "Copying Requirements"
+      cp "$makeDir/requirements" "reqs"
+   fi
+   
+   if [ ! -d tests/out ]; then
+      echo "Making 'tests' folder"
+      mkdir -p tests/out
+   fi
+
+   echo "Linking Executables"
+   for e in ~kmammen/357/$1/*; do
+      if [ -x $e -a ! -d $e -a ! -f ${e##*/} ]; then
+         ln -s "$e" "${e##*/}"
+      fi
+   done
+}
+
+# setupTest Function
+# -----------------------------------
+# Sets up assignment test descriptions
+# 
+# Args:
+#   $1: assignment name to use
+# -----------------------------------
+function setupTest {
+   if [ -z $1 ]; then
+      echo "ERROR: No assignment specified."
+      exit;
+   fi
+   echo "Setting up tests for $1."
+   local dir="$sourcedir/$1"
+   
+   if [ ! -d "$dir" ]; then
+      echo "ERROR: Assignment '$1' does not exist."
+      exit;
+   fi
+   if [ ! -d tests/out ]; then
+      echo "Making 'tests' folder"
+      mkdir -p tests/out
+   fi
+
+   for type in $dir/tests; do
+      #mkdir $type
+      for d in $dir/tests/$type ; do
+         local base=$(basename "$type")
+         local fileType=${base//[0-9]/}
+         local descFileName="${base:0:1}${d//[!0-9]/}.desc"
+
+         echo -e "\e[2m (Writing description to $descFileName)\e[0m"
+         #display tests as saving
+         #displayTest "$d" "$fileType" > "tests/$type/$descFileName"
+         displayTest "$d" "$fileType" > "./tests/$descFileName"
+      done
+   done
+}
+
+# complexityGen Function
+# -----------------------------------
+# Run the complexity program and
+# automatically calculates relevant stats
+# could use a bit of work to clean up the needing a file bit
+# Args:
+#   $1: an array of c files to pass to complexity
+# -----------------------------------
+function complexityGen {
+   local arr=("$@");
+   if [ ${#arr[@]} -gt 0 ]; then
+      complexity -t0 -s1 $@ > comp.out
+   else
+      complexity -t0 -s1 *.c > comp.out
+   fi
+   sed -e '$d' -i comp.out
+   cat comp.out
+   sed -e '1d' -e '2d' -i comp.out
+   declare -a scores
+   {
+   while read -r score lines ncl file func; do
+       scores+=($score)
+   done
+   } < comp.out
+   IFS='+' totalScore=$(echo "scale=1;${scores[*]}"|bc)
+   IFS='+' averageScore=$(echo "scale=1;(${scores[*]})/${#scores[@]}"|bc)
+   local topQuartile=${scores[@]:${#scores[@]}*3/4}
+   local ratioMath=$(tr ' ' '+' <<< $topQuartile)
+   local ratioSum=$(($ratioMath))
+   local ratio=$(echo "scale=3;$ratioSum/$totalScore"|bc)
+   echo "Top:     ($ratio)    $topQuartile"
+   echo "Total:     $totalScore"
+   echo "Average:   $averageScore"
+   rm comp.out
+}
+
+# runTest Function
+# -----------------------------------
+# Executes the input program wrapped in SafeRun
+# Args:
+#   $1: name of the test being run (for io)
+#   $2: program name to run
+#   $3: process limit to be passed to SafeRun
+#   $4: text to append to output filenames
+# -----------------------------------
+function runTest {
+   local name=$1
+   local exe=$2
+   local processCount=$3
+   local fnAppend=$4
+
+   if [ -f "$in$name.arg" ]; then
+      $saferun -i "-p$processCount" ./$exe $(<"$in$name.arg") < "$in$name$fnAppend.in" 1> "$out$name.stdout$fnAppend" 2> "$out$name.stderr$fnAppend";
+   else
+      $saferun -i "-p$processCount" ./$exe < "$in$name.in" 1> "$out$name.stdout$fnAppend" 2> "$out$name.stderr$fnAppend";
+   fi
+   echo $? > "$out$name.exit$fnAppend"
+   if [ "$doMemCheck" -eq 1 ]; then
+      valgrind ./$exe < "$in$name.in" 1> /dev/null 2> "$out$name.memcheck.expect"
+   fi
+   if [ -f "$in$name.file" ]; then
+      read line < "$in$name.file";
+      cp $line $line.stdout.expect 2>/dev/null;
+   fi
+}
+
+# runIndivTest Function
+# -----------------------------------
+# Executes the full test suite against a single test
+# Args:
+#   $1: name of the file
+# -----------------------------------
+function runIndivTest {
+   local $name=$1;
+   # Print the name of description if it's there
+   if [ -f "$in$name.desc" ]; then
+      read line < "$in$name.desc"
+      echo -e "\e[2m($name) \e[0m$line"
+
+      # Create .in if it doesn't exist
+      if [ ! -f "$in$name.in" ]; then
+         touch "$in$name.in"
+      fi
+      
+      # Check to see that there are enough processes to run
+      checkProcesses $processReqd
+      #magic... pRun=$(($pReqd + $pUsed + 2))
+      
+      # Run tests to make the reference solutions
+      runTest $name $prgmName $processReqd ".expect"
+
+      # Run tests agaisnt our code
+      runTest $name $aout $processReqd ""
+
+      # Diff the results, print them nicely
+      diffResults $name
+   fi
+}
+
+# diffResults Function
+# -----------------------------------
+# Runs diff against the test being input
+# Args:
+#   $1: name of the test
+# -----------------------------------
+function diffResults {
+   local name=$1
+   echo -n -e "\e[4m\e[1m"
+   local diffout=$(diff -q $out$name.stdout $out$name.stdout.expect);
+   local differr=$(diff -q $out$name.stderr $out$name.stderr.expect);
+   local diffext=$(diff -q $out$name.exit $out$name.exit.expect);
+   local diffleak="";
+   if [ -f "$name.memcheck.expect" ] && [ -f "$name.memcheck" ]; then
+      diffleak=$(grep "All heap blocks were freed -- no leaks are possible" $out$name.memcheck);
+   fi
+   if [ -f "$in$name.file" ]; then
+      {
+         read line;
+         difffile=$(diff -q "$line.mine" "$line.stdout.expect");
+      } < $in$name.file;
+   fi
+   if [ -f "$in$name.desc" ]; then
+      if [[ ! -z "$diffout" || ! -z "$differr" || ! -z "$diffext" || ! -z "$difffile" || ! -z "$diffleak" ]]; then
+         echo -n "Difference:"
+         if [ ! -z "$diffout" ]; then
+            echo -n " Output,"
+         fi
+         if [ ! -z "$differr" ]; then
+            echo -n " Errors,"
+         fi
+         if [ ! -z "$diffext" ]; then
+            echo -n " Exit,"
+         fi
+         if [ ! -z "$difffile" ]; then
+            echo -n " File,"
+         fi
+         if [ ! -z "$diffleak" ]; then
+            echo -n " Memory Leak,"
+         fi
+         echo -e "\b\e[0m "
+         {
+            read
+            while read line; do
+               echo -e "\e[0m$line"
+            done
+         } < "$in$name.desc"
+      fi
+   else
+      echo "ERROR: missing description"
+   fi
+   echo -n -e "\e[0m"
+}
+
+# displayTestRslts Function
+# -----------------------------------
+# Displays results of the test(s)
+# Args:
+#   $1: array of test file names
+# -----------------------------------
+function displayTestRslts {
+   local arr=("$@")
+   for testName in "${arr[@]}"; do
+      #skip if not a test
+      if [ ! -f "$in$testName.desc" ]; then
+         continue
+      fi
+      echo "Test: $testName";
+      local name="$out$testName";
+
+      local diffout=$(diff $name.stdout $name.stdout.expect);
+      if [ ! -z "$diffout" ]; then
+         echo "stdout < mine | stdout > expect"
+         echo "$diffout"
+         echo;
+      fi
+      
+      local differr=$(diff $name.stderr $name.stderr.expect);
+      if [ ! -z "$differr" ]; then
+         echo "stderr < mine | stderr > expect"
+         echo "$differr"
+         echo;
+      fi
+
+      # Check if valgrind report exists
+      if [ -f "$name.memcheck.expect" ] && [ -f "$name.memcheck" ] && [ -z "$(grep "Permission denied" $name.memcheck.expect)" ]; then
+         local diffvalgrind=$(diff $name.memcheck $name.memcheck.expect);
+         if [ ! -z "$diffvalgrind" ]; then
+            echo "valgrind report < mine | valgrind report > expect"
+            echo "$diffvalgrind"
+            echo;
+         fi     
+      fi
+
+      local diffexit=$(diff $name.exit $name.exit.expect);
+      if [ ! -z "$diffexit" ]; then
+         echo "exit code < mine | exit code > expect"
+         echo "$diffexit"
+         echo;
+      fi
+
+      # more black box(magic)
+      local base=$(basename $name);
+      if [ -f "$in$base.file" ]; then
+         {
+            read line;
+            diff "$line.mine" "$line.stdout.expect";
+         } < "$in$base.file";
+      fi
+   done
+}
+
+# printDescriptions Function
+# -----------------------------------
+# Gets, saves, and prints test descriptions
+# Args:
+#   $1: Type of test (feature/core)
+# -----------------------------------
+function printDescriptions {
+   local testType=$1
+   printHeader "Requirements"
+   cat reqs
+   echo ""
+   printHeader "Tests"
+   for t in $indir/*.desc ; do
+      base=$(basename "$t" ".desc");
+      if [[ $base == "c"* ]]; then
+         if [[ $testType == "core" || -z $testType ]]; then
+            displayTest $t
+            echo "";
+         fi
+      elif [[ $base == "f"* ]]; then
+         if [[ $testType == "feature" || -z $testType ]]; then
+            displayTest $t
+            echo "";
+         fi
+      elif [[ -z $testType ]]; then
+         echo "$base"
+         displayTest "$t"
+         echo "";
+      fi
+   done
+}
+
+
+# displayTest Function
+# -----------------------------------
+# Pretty-prints test descriptions
+# Args:
+#   $1: test file
+# -----------------------------------
+function displayTest { 
+  echo -n -e "\e[1m$2 ${1:4:2}\e[0m"
+  if [ -r "$1/value" ]; then
+    echo -n -e "\e[2m - worth: "
+    tr -d '\n' < "$1/value"
+  fi
+  echo -e "\e[0m"
+  cat "$1/description"
+}
+
+#######################################################
+# MAIN
+#######################################################
+aout="a.out"
+in=$indir/
+out=$in/$outdir
+#Check if arguments
+if [ ! -z $1 ]; then
+   while [ "$1" != "" ]; do
+      case $1 in
+         -o | --out )
+            shift 
+            aout=$1;
+            ;;
+         -m | --memcheck )
+            doMemCheck=1;
+            echo "WARNING: valgrind does not like being run from scripts, and so"
+            echo "   may produce erroneous results. Also takes much longer to run."
+            ;;
+         -p | --process )
+            shift 
+            processReqd=$1;
+            ;;
+         -t | --test )
+            displayTestRslts $@
+            exit
+            ;;
+         -d | --description )
+            shift
+            printDescriptions $1
+            exit
+            ;;
+         -D | --directory )
+            shift
+            indir=$1
+            in=$indir/
+            out=$in/$outdir/
+            ;;
+         -h | --help )
+            usage
+            exit
+            ;;
+        -s | --single )
+            usage
+            exit
+            ;;
+         -c | --complexity )
+            complexityGen $@
+            exit
+            ;;
+         -C | --clean )
+            make clean -s
+            cleanUp
+            exit
+            ;;
+         -g | --gen )
+            shift
+            setupDir $1
+            setupTest $1
+            exit
+            ;;
+         -gd | --gendir )
+            shift
+            setupDir $1
+            exit
+            ;;
+         -gt | --gentest )
+            shift
+            setupTest $1
+            exit
+            ;;
+         * )
+            if [ -f "$1" ]; then
+               prgmName=$1
+            else
+               echo "testit: invalid option '$1'"
+               echo "Try 'testit --help' for more information"
+               exit 1
+            fi
+      esac
+      shift
+   done
+else
+   echo "testit: invalid options"
+   echo "Try 'testit --help' for more information"
+   exit
+fi
+if [[ -z "$prgmName" || ! -d "$in" ]]; then
+   #prevents ID10T errors. should never make it here
+   echo "testit: No program specified"
+   echo "Try 'testit --help' for more information"
+   exit 1
+fi
+
+# Let's make sure we've got the processes for this
+checkProcesses $processReqd
+
+# Now compile the code
+make clean -s
+make -s
+
+# Now remove old test results
+cleanUp
+
+# Now run the tests
+for testInput in $indir/*.desc; do
+   name=$(basename $testInput)
+   name=${name%.desc}
+   echo $name
+   
+   # Print the name of description if it's there
+   if [ -f "$in$name.desc" ]; then
+      read line < "$in$name.desc"
+      echo -e "\e[2m($name) \e[0m$line"
+
+      # Create .in if it doesn't exist
+      if [ ! -f "$in$name.in" ]; then
+         touch "$in$name.in"
+      fi
+      
+      # Check to see that there are enough processes to run
+      checkProcesses $processReqd
+      #magic... pRun=$(($pReqd + $pUsed + 2))
+      
+      # Run tests to make the reference solutions
+      runTest $name $prgmName $processReqd ".expect"
+
+      # Run tests agaisnt our code
+      runTest $name $aout $processReqd ""
+
+      # Diff the results, print them nicely
+      diffResults $name
+   fi
+done
