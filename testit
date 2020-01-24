@@ -47,6 +47,7 @@
 
 # User Configurable Defaults
 # -----------------------------------
+version="3.1.1"
 outdir=out
 indir=tests
 doMemCheck=0;
@@ -77,6 +78,29 @@ function usage {
     printf "%4s, %-26s%s\n" "-gt" "--gentests <assignment>" "generates test descriptions for assignments.";
     printf "\n%6s%-11s%s\n\n" "" "--help" "display this help and exit";
 }
+
+# checkConfigs Function
+# -----------------------------------
+# Checks for latest config, updates as necessary
+# Updating walks user through selecting each option
+# -----------------------------------
+function checkConfigs {
+  if [ -e ~/.config/testit.config ]; then
+    {
+        read line;
+        read line;
+        if [ "$line" == "version=$version" ]; then
+            return
+        fi
+    } < ~/.config/testit.config
+  fi
+  # If not found or not right version, build new config
+
+  #pls implement kthnx
+  echo -e "\e[4m\e[1mWoops, no config found. Bye!\e[0m"
+  exit
+}
+
 
 # printHeader Function
 # -----------------------------------
@@ -482,6 +506,8 @@ function displayTest {
 aout="a.out"
 in=$indir/
 out=$in/$outdir
+#Check configs
+checkConfigs
 #Check if arguments
 if [ ! -z $1 ]; then
    while [ "$1" != "" ]; do
