@@ -96,7 +96,24 @@ function checkConfigs {
   fi
   # If not found or not right version, build new config
 
-  #pls implement kthnx
+  # -------------------------
+  # List of Config Attributes
+  # -------------------------
+  # version - set automatically
+  # in-directory - folder to pull tests from
+  # # default: "tests"
+  # out-directory - relational from in-directory
+  # # default: "out" ("tests/out")
+  # assignment-source - base directory to pull assignments from
+  # # no default, example: "~kmammen-grader/evaluations/F19"
+  # do-mem-check - whether or not to run memory leak check with tests
+  # # default: false
+  # safeRun-directory - locaton of safeRun executable
+  # # default: "~/kmammen-grader/bin/SafeRun"
+  # processes-required - How many processes to limit each test to
+  # # default: 10
+  # aout - compiled program name
+  # # default: "a.out"
   echo -e "\e[4m\e[1mWoops, no config found. Bye!\e[0m"
   exit
 }
